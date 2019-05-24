@@ -1,7 +1,7 @@
 import functools
 import asyncio
 
-from paho.mqtt.client import Client as _Client
+import paho.mqtt.client as mqtt
 
 
 class MQTTMessageInfo(object):
@@ -43,8 +43,8 @@ class Client(object):
     """
 
     def __init__(self, loop=None, *args, **kwargs):
-        self._loop = loop or asyncio.get_event_loop()
-        self._client = _Client(*args, **kwargs)
+        self._loop = loop or asyncio.get_running_loop()
+        self._client = mqtt.Client(*args, **kwargs)
 
         self._wrap_blocking_method("connect")
         self._wrap_blocking_method("connect_srv")
@@ -60,6 +60,33 @@ class Client(object):
         self._wrap_callback("on_subscribe")
         self._wrap_callback("on_unsubscribe")
         self._wrap_callback("on_log")
+
+        self._client.on_socket_open = self._on_socket_open
+        self._client.on_socket_close = self._on_socket_close
+        self._client.on_socket_register_write = self._on_socket_register_write
+        self._client.on_socket_unregister_write = self._on_socket_unregister_write
+
+    ###########################################################################
+    # External event loop callbacks
+    ###########################################################################
+
+    def _on_socket_open(self, client, userdata, sock):
+        self._loop.add_reader(sock, client.loop_read)
+        self._misc_task = asyncio.run_coroutine_threadsafe(self._misc_loop(), self._loop)
+
+    def _on_socket_close(self, client, userdata, sock):
+        self._loop.remove_reader(sock)
+        self._misc_task.cancel()
+
+    def _on_socket_register_write(self, client, userdata, sock):
+        self._loop.add_writer(sock, client.loop_write)
+
+    def _on_socket_unregister_write(self, client, userdata, sock):
+        self._loop.remove_writer(sock)
+
+    async def _misc_loop(self):
+        while self._client.loop_misc() == mqtt.MQTT_ERR_SUCCESS:
+            await asyncio.sleep(1)
 
     ###########################################################################
     # Utility functions for creating wrappers
@@ -95,14 +122,14 @@ class Client(object):
     # Special-case wrappers around certain methods
     ###########################################################################
 
-    @functools.wraps(_Client.publish)
+    @functools.wraps(mqtt.Client.publish)
     def publish(self, *args, **kwargs):
         # Produce an alternative MQTTMessageInfo object with a coroutine
         # wait_for_publish.
         return MQTTMessageInfo(
             self._loop, self._client.publish(*args, **kwargs))
 
-    @functools.wraps(_Client.message_callback_add)
+    @functools.wraps(mqtt.Client.message_callback_add)
     def message_callback_add(self, sub, callback):
         # Ensure callbacks are called from MQTT
         @functools.wraps(callback)
